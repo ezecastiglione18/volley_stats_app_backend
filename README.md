@@ -1,9 +1,9 @@
 # volley_stats_app_backend
 
 Backend de RallyStats: por ahora, una única Cloud Function (`redeemPromoCode`)
-que permite canjear un código promocional para obtener **1 mes de RallyStats
-Premium**, sin depender de un otorgamiento manual por cuenta desde el
-dashboard de RevenueCat.
+que permite canjear un código promocional para obtener **RallyStats
+Premium por la cantidad de días que indique ese código**, sin depender de un
+otorgamiento manual por cuenta desde el dashboard de RevenueCat.
 
 Repo separado del de la app ([volley_stats_app](https://github.com/ezecastiglione18/volley_stats_app)),
 pero atado al **mismo proyecto de Firebase** (`volleystatsapp-be835`): reutiliza
@@ -50,9 +50,15 @@ las cuentas reales** (Firebase, RevenueCat, Google Cloud Billing — hoy, Eze).
    Owner/Editor del proyecto.
 2. **Acceso al dashboard de RevenueCat** para generar/rotar la *Secret API
    Key* (la que pega en Project settings → API keys → "+ New secret API
-   key" — no la *Public API Key* que ya usa la app). Hay **una sola** key
-   por proyecto, la misma para todo — RevenueCat no tiene una key separada
-   de "sandbox" para esto (ver advertencia en la sub-fase 1.4 más abajo).
+   key" — no la *Public API Key* que ya usa la app). RevenueCat no tiene una
+   key separada de "sandbox" para esto (ver advertencia en la sub-fase 1.4
+   más abajo) — **pero sí importa el "API version" del desplegable al
+   crearla**: elegir **V1**, no V2. El código usa el endpoint V1 de
+   RevenueCat (`/v1/subscribers/.../entitlements/.../promotional`), y una
+   key V2 (con permisos granulares) le da 403 "incompatible with RevenueCat
+   API V1" — no hay forma de que una key V2 sirva acá, hay que generarla
+   como V1 directamente (sin pantalla de permisos granulares, sólo un
+   nombre).
 3. **La secret key en sí**, cargada en `functions/.secret.local` (para el
    emulador, gitignored) o vía `firebase functions:secrets:set
    REVENUECAT_SECRET_KEY` (para producción, queda en Google Secret Manager).
@@ -97,7 +103,7 @@ npm run serve                      # build + levanta Auth/Firestore/Functions em
 npm run shell                        # build + consola interactiva para invocar functions a mano
 
 # --- Generar un código promocional ---
-node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> [etiqueta]
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias> [etiqueta]
 # contra el emulador: anteponer FIRESTORE_EMULATOR_HOST=localhost:8080
 # sin esa variable, y con credenciales reales: va contra producción
 
@@ -158,22 +164,31 @@ promo_codes/{code}                  // ej: "UNILIVO2026"
   label: string | null              // referencia para el admin (opcional)
   maxRedemptions: number            // cupo total del código
   redeemedCount: number             // contador, se incrementa en la transacción
+  durationDays: number              // cuántos días de premium otorga ESTE código (ej. 1, 30)
   expiresAt: timestamp              // el código deja de servir después de esta fecha
   createdAt: timestamp
   createdBy: string                 // usuario del SO que corrió el script
 
 promo_codes/{code}/redemptions/{uid}
-  redeemedAt: timestamp             // 1 doc por cuenta que ya canjeó ESTE código
+  reservedAt: timestamp             // se crea al reservar el cupo, antes de llamar a RevenueCat
+  redeemedAt: timestamp | null      // null hasta que RevenueCat confirma; recién ahí "ya usado" de verdad
 ```
 
 Cerrado por completo a lectura/escritura de clientes (`firestore.rules`) —
 sólo la Cloud Function, que corre con el Admin SDK, accede.
 
-La duración del premium otorgado está **fija en 1 mes calendario**
-(calculada en `revenuecat.ts`, mandada como `end_time_ms` a RevenueCat), a
-propósito: es lo único que se necesita hoy. Si más adelante hacen falta
-códigos de otra duración, hay que sumar un campo al documento (ej.
-`durationMonths`) y leerlo en `redeemPromoCode.ts` en vez de asumir 1 mes.
+El doc de `redemptions/{uid}` pasa por dos estados a propósito: se crea con
+`redeemedAt: null` al reservar el cupo, y recién se confirma (`redeemedAt`
+con la fecha real) después de que RevenueCat otorgó el entitlement. Sólo un
+doc **confirmado** bloquea un reintento (`already_used_by_account`) — uno
+sin confirmar es un intento anterior que se cortó a mitad de camino (falló
+RevenueCat, o hasta la propia reversión), y no debe dejar a una cuenta
+bloqueada sin haber recibido nada.
+
+La duración la decide **cada código** (`durationDays`), no es fija: un
+código de prueba puede otorgar 1 día, uno real para una federación puede
+otorgar 30. `revenuecat.ts` calcula la fecha de vencimiento a partir de ese
+número y la manda a RevenueCat como `end_time_ms`.
 
 ## Generar un código
 
@@ -228,7 +243,7 @@ firebase emulators:start --only auth,firestore,functions
 
 1. Sembrar un código de prueba contra el emulador:
    ```bash
-   FIRESTORE_EMULATOR_HOST=localhost:8080 node lib/scripts/createPromoCode.js TESTCODE 1 2020-01-01 "vencido a propósito"
+   FIRESTORE_EMULATOR_HOST=localhost:8080 node lib/scripts/createPromoCode.js TESTCODE 1 2020-01-01 30 "vencido a propósito"
    ```
 2. Desde la Emulator UI → **Authentication**, crear un usuario de prueba y
    copiar su uid.
@@ -262,7 +277,8 @@ firebase emulators:start --only auth,firestore,functions
    ninguna cuenta real, ni siquiera de prueba propia que uses para otra cosa.
 4. Canjear el código autenticado como ese uid.
 5. Confirmar en el dashboard de RevenueCat (proyecto real) que ese uid tiene
-   ahora el entitlement `rallystats_pro` activo por 1 mes, y en la Emulator
+   ahora el entitlement `rallystats_pro` activo por la cantidad de días del
+   código sembrado, y en la Emulator
    UI que `promo_codes/{CODIGO}` subió `redeemedCount` y que existe
    `promo_codes/{CODIGO}/redemptions/{uid}`.
 6. **Limpiar**: revocar el entitlement de prueba con
@@ -277,28 +293,35 @@ firebase emulators:start --only auth,firestore,functions
    debe quedar incrementado ni el subdocumento `redemptions/{uid}` debe
    existir (la transacción de reversa hizo su trabajo).
 
-### 1.5 — Deploy a producción (todavía sin pantalla en la app)
+### 1.5 — Deploy a producción
 
-1. `firebase functions:secrets:set REVENUECAT_SECRET_KEY` con la misma
-   Secret Key de RevenueCat ya usada en 1.4 (no hay una "de producción"
-   distinta).
-2. `firebase deploy --only functions:redeemPromoCode,firestore:rules`.
-3. Generar un código de prueba real (cupo bajo, ej. 1) con
-   `node lib/scripts/createPromoCode.js`, esta vez sin
-   `FIRESTORE_EMULATOR_HOST` (va contra el Firestore real).
+**Ya se hizo** (función activa en `southamerica-east1`, secret V1 cargado,
+probado de punta a punta con un código real desde la app). Para repetirlo
+después de un cambio de código, o si hay que rotar el secret:
 
-**Prueba controlada, sin tocar cuentas reales de usuarios:** como todavía no
-existe la pantalla "Tengo un código" en la app (eso es la Fase 2, client-side,
-después de que 1.0.2 esté estable), para probar el flujo end-to-end contra la
-function ya desplegada hace falta invocarla a mano con un ID token real. La
-forma más simple: crear una cuenta descartable de prueba desde la propia app
-(`Crear una cuenta`, con un email tipo `+test-canje@...`), loguearse, y desde
-un script Node chico (usando `firebase-admin` para mintear un custom token
-para ese uid y cambiarlo por un ID token, o pegando el ID token que loguea la
-app en modo debug) invocar la function vía HTTPS callable. Confirmar en el
-dashboard de RevenueCat que esa cuenta descartable recibió el entitlement,
-revocarlo (paso 6 de la sub-fase 1.4) y borrar la cuenta desde la consola de
-Firebase Auth para no dejar basura.
+1. `firebase functions:secrets:set REVENUECAT_SECRET_KEY` — sólo hace falta
+   si cambió el *valor* de la key (ojo: tiene que ser una key **V1**, ver
+   checklist de arriba). Si la función ya estaba deployada usando una
+   versión anterior del secret, la CLI detecta que "1 function is using
+   stale version of secret" y **ofrece redeployarla sola** — decirle que sí
+   ahorra el paso 2 siguiente.
+2. `firebase deploy --only functions:redeemPromoCode,firestore:rules` —
+   hace falta sí o sí después de cualquier cambio en el *código* (el paso 1
+   sólo redespliega automáticamente si lo que cambió fue el secret).
+3. Generar un código real con `node lib/scripts/createPromoCode.js` (sin
+   `FIRESTORE_EMULATOR_HOST`, va contra producción) — si no hay credenciales
+   de administrador a mano en la máquina desde la que se corre esto (no hay
+   `gcloud` ni una service account key configurada), es más rápido crear el
+   documento a mano en Firebase Console → Firestore Database, con los
+   mismos campos de "Modelo de datos" más arriba.
+
+**Prueba end-to-end**: ya no hace falta invocar la función a mano con un ID
+token — la pantalla "Tengo un código" del lado cliente (Fase 2, ver
+`volley_stats_app`) ya está implementada. Alcanza con instalar un build de
+la app (`flutter build apk --release`), loguearse, y canjear el código desde
+Configuración de la cuenta → Tengo un código. Usar una cuenta descartable la
+primera vez que se prueba un código nuevo, para no gastar el cupo de un
+código real por error.
 
 ### 1.6 — Logs, monitoreo y hardening opcional
 
@@ -309,15 +332,21 @@ Firebase Auth para no dejar basura.
   Monitoring, y sumar Firebase App Check para que la function sólo acepte
   llamadas que vengan de la app real (ver PDF, sección 7).
 
-## Fase 2 (pendiente, lado app)
+## Fase 2 (lado app — implementada, todavía no publicada)
 
-No es parte de este repo. Cuando 1.0.2 esté estable en producción: sumar
-`cloud_functions` al `pubspec.yaml` de `volley_stats_app`, el servicio
-`redeem_code_service.dart` y la pantalla `RedeemCodeScreen` (pseudocódigo ya
-armado en el PDF), y volver a pasar por revisión de Google Play como versión
-nueva (ej. 1.0.3).
+No es parte de este repo, vive en `volley_stats_app`: `cloud_functions` en
+el `pubspec.yaml`, `lib/services/redeem_code_service.dart` y la pantalla
+`lib/screens/subscription/redeem_code_screen.dart` (accesible desde
+Configuración de la cuenta → "Tengo un código"). Ya está escrita y probada
+de punta a punta contra este backend real (build instalado por fuera de
+Play Store) — lo único que falta es que salga en una versión publicada:
+seguir el proceso de release ya documentado en el `CLAUDE.md` de ese repo
+(regenerar el manual si corresponde, `flutter analyze`, APK, AAB) y subirla
+como versión nueva (ej. 1.0.3), pasando de nuevo por revisión de Google
+Play. Ver el `CLAUDE.md` de `volley_stats_app` para los dos detalles no
+obvios del lado cliente (región de la function, invalidar el caché de
+RevenueCat después del canje).
 
-Mientras tanto, para cualquiera que necesite el premium antes de que la Fase
-2 esté lista, el otorgamiento manual por dashboard de RevenueCat sigue
-funcionando hoy mismo, sin depender de este backend ni de ninguna versión de
-la app.
+Mientras tanto, para cualquiera que necesite el premium antes de que esa
+versión nueva esté publicada, el otorgamiento manual por dashboard de
+RevenueCat sigue funcionando igual, sin depender de esto.

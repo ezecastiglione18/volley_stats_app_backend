@@ -7,8 +7,8 @@
  * sub-fase 1.3), o a producción si hay credenciales reales
  * (GOOGLE_APPLICATION_CREDENTIALS) — Admin SDK decide solo según el entorno.
  *
- * Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> [etiqueta]
- * Ejemplo: node lib/scripts/createPromoCode.js UNILIVO2026 50 2026-12-31 "Unilivo"
+ * Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias> [etiqueta]
+ * Ejemplo: node lib/scripts/createPromoCode.js UNILIVO2026 50 2026-12-31 30 "Unilivo"
  */
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
@@ -18,10 +18,12 @@ if (getApps().length === 0) {
 }
 
 async function main(): Promise<void> {
-  const [rawCode, maxRedemptionsRaw, expiresAtRaw, label] = process.argv.slice(2);
+  const [rawCode, maxRedemptionsRaw, expiresAtRaw, durationDaysRaw, label] = process.argv.slice(2);
 
-  if (!rawCode || !maxRedemptionsRaw || !expiresAtRaw) {
-    console.error('Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> [etiqueta]');
+  if (!rawCode || !maxRedemptionsRaw || !expiresAtRaw || !durationDaysRaw) {
+    console.error(
+      'Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias> [etiqueta]',
+    );
     process.exit(1);
   }
 
@@ -29,6 +31,12 @@ async function main(): Promise<void> {
   const maxRedemptions = Number(maxRedemptionsRaw);
   if (!Number.isInteger(maxRedemptions) || maxRedemptions <= 0) {
     console.error('El cupo tiene que ser un entero positivo');
+    process.exit(1);
+  }
+
+  const durationDays = Number(durationDaysRaw);
+  if (!Number.isInteger(durationDays) || durationDays <= 0) {
+    console.error('La duracion tiene que ser un entero positivo, en dias (ej. 1, 30)');
     process.exit(1);
   }
 
@@ -52,13 +60,14 @@ async function main(): Promise<void> {
     label: label ?? null,
     maxRedemptions,
     redeemedCount: 0,
+    durationDays,
     expiresAt: Timestamp.fromDate(expiresAt),
     createdAt: Timestamp.now(),
     createdBy: process.env.USERNAME || process.env.USER || 'desconocido',
   });
 
   console.log(
-    `Codigo ${code} creado: cupo=${maxRedemptions}, vence=${expiresAt.toISOString()}${
+    `Codigo ${code} creado: cupo=${maxRedemptions}, duracion=${durationDays} dia(s), vence=${expiresAt.toISOString()}${
       label ? `, etiqueta="${label}"` : ''
     }`,
   );

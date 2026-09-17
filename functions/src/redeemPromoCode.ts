@@ -17,7 +17,9 @@ type RedeemError =
   | 'quota_exceeded'
   | 'already_used_by_account';
 
-type ReservationResult = { ok: true } | { ok: false; error: RedeemError };
+type ReservationResult =
+  | { ok: true; durationDays: number }
+  | { ok: false; error: RedeemError };
 
 function normalizeCode(raw: unknown): string {
   if (typeof raw !== 'string') return '';
@@ -25,10 +27,10 @@ function normalizeCode(raw: unknown): string {
 }
 
 /**
- * Canjea un código promocional y, si es válido, otorga un mes de premium
- * (entitlement rallystats_pro) a la cuenta que llama. Un mismo código no se
- * puede canjear dos veces desde la misma cuenta (subdocumento
- * promo_codes/{code}/redemptions/{uid}).
+ * Canjea un código promocional y, si es válido, otorga el entitlement
+ * rallystats_pro a la cuenta que llama por la cantidad de días que indique
+ * el código (`durationDays`). Un mismo código no se puede canjear dos veces
+ * desde la misma cuenta (subdocumento promo_codes/{code}/redemptions/{uid}).
  *
  * Devuelve { ok: true } o { ok: false, error } para los rechazos esperados
  * (código inválido/vencido/agotado/ya usado); sólo lanza HttpsError ante
@@ -70,13 +72,19 @@ export const redeemPromoCode = onCall(
       }
 
       const redemptionSnap = await tx.get(redemptionRef);
-      if (redemptionSnap.exists) {
+      // Sólo cuenta como "ya usado" si quedó confirmado (redeemedAt seteado).
+      // Un doc sin confirmar es un intento anterior que se cortó a mitad de
+      // camino (RevenueCat falló y, por lo que sea, la reversión también) —
+      // dejar reintentar en vez de bloquear a una cuenta que nunca recibió
+      // el premium.
+      if (redemptionSnap.exists && redemptionSnap.data()?.redeemedAt) {
         return { ok: false, error: 'already_used_by_account' };
       }
 
+      const durationDays = data.durationDays as number;
       tx.update(codeRef, { redeemedCount: FieldValue.increment(1) });
-      tx.set(redemptionRef, { redeemedAt: FieldValue.serverTimestamp() });
-      return { ok: true };
+      tx.set(redemptionRef, { redeemedAt: null, reservedAt: FieldValue.serverTimestamp() });
+      return { ok: true, durationDays };
     });
 
     if (!reservation.ok) {
@@ -86,21 +94,39 @@ export const redeemPromoCode = onCall(
 
     // 2) Recién ahora, fuera de la transacción, pegarle a RevenueCat.
     try {
-      await grantPromotionalEntitlement(uid, revenueCatSecretKey.value());
+      await grantPromotionalEntitlement(uid, revenueCatSecretKey.value(), reservation.durationDays);
     } catch (err) {
       // Si RevenueCat falla, liberar el cupo reservado para no "quemar" el
-      // código en vano ni dejar a la cuenta bloqueada para reintentar.
+      // código en vano ni dejar a la cuenta bloqueada para reintentar. Esto
+      // es "best effort": si esta reversión también falla (corte de red,
+      // timeout de la function), el doc de redemptions queda sin
+      // `redeemedAt`, así que el chequeo de arriba igual va a dejar
+      // reintentar — sólo queda un poco de cupo "de más" gastado, en vez de
+      // una cuenta bloqueada sin haber recibido nada.
       logger.error('redeemPromoCode: fallo RevenueCat, revirtiendo reserva', {
         uid,
         code,
         error: String(err),
       });
-      await db.runTransaction(async (tx) => {
-        tx.update(codeRef, { redeemedCount: FieldValue.increment(-1) });
-        tx.delete(redemptionRef);
-      });
+      try {
+        await db.runTransaction(async (tx) => {
+          tx.update(codeRef, { redeemedCount: FieldValue.increment(-1) });
+          tx.delete(redemptionRef);
+        });
+      } catch (rollbackErr) {
+        logger.error('redeemPromoCode: la reversion tambien fallo, revisar a mano', {
+          uid,
+          code,
+          error: String(rollbackErr),
+        });
+      }
       throw new HttpsError('unavailable', 'No se pudo activar el premium, proba de nuevo');
     }
+
+    // 3) Confirmar la redención recién ahora que RevenueCat ya otorgó el
+    // entitlement — antes de esto, un reintento de la misma cuenta todavía
+    // podía volver a pasar por acá (ver el chequeo de `redeemedAt` arriba).
+    await redemptionRef.update({ redeemedAt: FieldValue.serverTimestamp() });
 
     logger.info('redeemPromoCode: canje exitoso', { uid, code });
     return { ok: true };

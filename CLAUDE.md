@@ -6,8 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Backend de **RallyStats** (la app Flutter de `volley_stats_app`, repo
 separado): Firebase Cloud Functions (2nd gen) para canjear códigos
-promocionales que otorgan 1 mes de RallyStats Premium sin depender de un
-otorgamiento manual por dashboard de RevenueCat. Es la implementación de la
+promocionales que otorgan RallyStats Premium (por la cantidad de días que
+indique cada código) sin depender de un otorgamiento manual por dashboard de
+RevenueCat. Es la implementación de la
 Fase 1 descrita en `RallyStats-Server-Side-Codigos-Federaciones.pdf`
 (documento de diseño original — ahí está el razonamiento completo detrás de
 cada decisión de este repo; acá sólo el resumen operativo).
@@ -32,19 +33,18 @@ si hace falta reabrir esta decisión.
 
 El PDF fue escrito pensando en códigos de federaciones (`federation_codes`,
 `redeemFederationCode`), pero el pedido real es más simple y genérico: **un
-código promocional cualquiera, canjeable una vez por cuenta, siempre por 1
-mes de premium**. Este repo generalizó esa idea:
+código promocional cualquiera, canjeable una vez por cuenta, por la cantidad
+de días que indique ese código**. Este repo generalizó esa idea:
 
 - Colección `promo_codes` en vez de `federation_codes` (sin campo
   `federation`, sí un `label` opcional libre para que el admin identifique
   el código).
 - Function `redeemPromoCode` en vez de `redeemFederationCode`.
-- Duración **fija en 1 mes calendario**, calculada en `revenuecat.ts` y
-  mandada a RevenueCat como `end_time_ms` (no el campo `duration` del PDF,
-  ver abajo) en vez del `durationBucket` configurable del PDF — no hace
-  falta esa flexibilidad todavía. Si en el futuro hacen falta códigos de
-  otra duración, sumar un campo al documento de Firestore y leerlo ahí en
-  vez de asumir 1 mes a mano en otro lugar del código.
+- Duración por código: campo `durationDays` (número de días, ej. 1 para un
+  código de prueba, 30 para uno real) en vez del `durationBucket` del PDF
+  (`'monthly' | 'weekly' | ...`, pensado en los buckets fijos de RevenueCat).
+  Se manda a RevenueCat como `end_time_ms` (timestamp explícito), no como el
+  campo `duration` del PDF — ver la corrección de abajo sobre por qué.
 
 ## Corrección respecto al PDF: RevenueCat no tiene modo sandbox para esto
 
@@ -67,10 +67,37 @@ de abajo):
    descartable (nunca una cuenta real) y de revocar el entitlement de
    prueba después (`revokePromotionalEntitlement`) — no de ningún "modo
    sandbox" que no existe para este endpoint puntual.
+3. **Una Secret API Key "V2" (con permisos granulares) no sirve para el
+   endpoint V1 que usa este código** — tira 403
+   `"You're trying to use a secret API key incompatible with RevenueCat API
+   V1"`. Pasó en la práctica: la primera key que se generó fue V2 por
+   default, y sólo se notó al ver el error en `firebase functions:log`. Al
+   crear la key en RevenueCat, el desplegable "API version" tiene que decir
+   **V1** — ahí no aparece ninguna pantalla de permisos granulares, sólo
+   pide un nombre. Si en algún momento se migra este código a la API v2 de
+   RevenueCat (`https://api.revenuecat.com/v2/...`, distinta URL base y
+   forma de pedir cosas), recién ahí una key V2 tendría sentido — hoy no.
 
 El resto (transacción de Firestore para reservar cupo, reglas cerradas a
 clientes, llamada a RevenueCat fuera de la transacción con rollback si
-falla) sigue el pseudocódigo del PDF casi textual.
+falla) sigue el pseudocódigo del PDF casi textual, con una diferencia real
+encontrada probándolo: ver el punto 3-5 de "Arquitectura" más abajo sobre
+por qué un doc de `redemptions/{uid}` no confirmado no bloquea un
+reintento.
+
+## Gotcha operativo: `firebase functions:secrets:set` no redespliega solo
+
+Cada `firebase functions:secrets:set` crea una **versión nueva** del secret
+en Secret Manager, pero una función ya deployada queda fijada a la versión
+que existía en el momento de SU deploy (se ve literalmente como
+`"version": "N"` en el `service_config` de la función, no como "latest").
+Cambiar el valor del secret no alcanza para que la función lea el valor
+nuevo. La CLI sí se da cuenta de este desfasaje: después de crear la versión
+nueva, si detecta que alguna función quedó "using stale version of secret",
+pregunta interactivamente si querés redeployarla ya mismo — decirle que sí
+ahorra correr `firebase deploy` a mano después. Si se contesta que no (o se
+corre el comando de forma no interactiva), la función sigue sirviendo con el
+secret viejo hasta el próximo deploy explícito.
 
 ## Comandos
 
@@ -83,7 +110,7 @@ npm run serve                # build + levantar emuladores (auth, firestore, fun
 npm run shell                  # build + firebase functions:shell (invocar a mano)
 npm run deploy                   # firebase deploy --only functions:redeemPromoCode
 npm run logs                       # firebase functions:log
-node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> [etiqueta]
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias> [etiqueta]
 ```
 
 No hay `flutter analyze`/tests automatizados en este repo — es sólo backend
@@ -103,15 +130,24 @@ infraestructura pensada para Sudamérica) que hace, en este orden estricto:
    tipee el usuario.
 3. **Todo dentro de una transacción de Firestore**: valida existencia,
    vigencia (`expiresAt`) y cupo (`redeemedCount < maxRedemptions`) del
-   código, valida que la cuenta no lo haya canjeado antes
-   (`promo_codes/{code}/redemptions/{uid}`), y si todo está bien reserva el
-   cupo (`increment(1)` + crear el subdocumento) atómicamente. Esto evita
-   que dos canjes simultáneos del mismo código exploten el cupo.
+   código, valida que la cuenta no tenga ya un canje **confirmado**
+   (`promo_codes/{code}/redemptions/{uid}` con `redeemedAt` seteado — un doc
+   con `redeemedAt: null` es un intento anterior que no llegó a confirmarse,
+   y no bloquea), y si todo está bien reserva el cupo (`increment(1)` +
+   crear el subdocumento con `redeemedAt: null`) atómicamente. Esto evita que
+   dos canjes simultáneos del mismo código exploten el cupo.
 4. **Recién fuera de la transacción**, llama a la API de RevenueCat
    (`grantPromotionalEntitlement` en `revenuecat.ts`) para otorgar el
-   entitlement `rallystats_pro`. Si eso falla, revierte la reserva (otra
-   transacción: decrementa el contador y borra el subdocumento) antes de
-   lanzar el error — nunca deja un código "quemado" sin haber otorgado nada.
+   entitlement `rallystats_pro`. Si eso falla, intenta revertir la reserva
+   (otra transacción: decrementa el contador y borra el subdocumento) antes
+   de lanzar el error — pero si **esa reversión también falla** (timeout,
+   corte de red), no se queda una cuenta bloqueada sin haber recibido nada:
+   como el doc de redemptions sigue sin `redeemedAt`, un reintento futuro
+   igual va a poder pasar por acá. El único costo de ese caso raro es cupo
+   de más gastado, nunca una cuenta trabada para siempre.
+5. Si RevenueCat otorgó bien, recién ahí confirma
+   (`redemptionRef.update({ redeemedAt: ... })`) — antes de esto, el intento
+   todavía se consideraba "no confirmado" a los efectos del punto 3.
 
 **`functions/src/firestore.ts`** centraliza `initializeApp()` +
 `getFirestore()` para que no se llame dos veces (el Admin SDK explota si se
@@ -160,18 +196,26 @@ pisan.**
 
 ## Estado actual / pendiente
 
-- **Implementado**: `redeemPromoCode`, reglas de Firestore, script de
-  generación de códigos. Compilado y verificado (`npm run build` sin
-  errores) pero **todavía no desplegado ni probado contra el emulador** —
-  seguir el plan de sub-fases del README antes de confiar en él contra
-  producción.
-- **No implementado a propósito** (ver README → Fase 2): nada del lado
-  Flutter (`cloud_functions` en `pubspec.yaml`, `redeem_code_service.dart`,
-  `RedeemCodeScreen`). Corresponde a otra versión de la app, después de que
-  1.0.2 esté estable en Play Store.
+- **Deployado y funcionando en producción**: `redeemPromoCode` está activa
+  en `southamerica-east1`, con el secret V1 de RevenueCat cargado, reglas de
+  Firestore desplegadas, y probada de punta a punta con un código real
+  (`PRUEBAPREMIUM`) desde un build real de la app — incluidos los casos de
+  rechazo (código inválido/vencido/agotado/ya usado) y el flujo completo de
+  éxito con el fix de caché del lado cliente (ver CLAUDE.md de
+  `volley_stats_app`).
+- **Implementado también del lado Flutter** (Fase 2, repo `volley_stats_app`):
+  `cloud_functions` en el `pubspec.yaml`, `redeem_code_service.dart` y
+  `RedeemCodeScreen` (en Configuración de la cuenta → "Tengo un código").
+  Sigue sin publicarse en Play Store — existe y funciona en un build
+  instalado por fuera, pendiente de sumarse a una versión nueva (ver README
+  → Fase 2).
 - **No implementado, opcional** (PDF sección 7): Firebase App Check para que
   la function sólo acepte llamadas de la app real, y una alerta de tasa de
   error en Cloud Monitoring. Ninguno de los dos bloquea usar esto hoy.
-- El plan Blaze y el secret `REVENUECAT_SECRET_KEY` de producción son pasos
-  manuales de Eze/Tomi en las consolas de Firebase/RevenueCat — no hay nada
-  que Claude Code pueda automatizar ahí.
+- El plan Blaze, la creación/rotación de la Secret API Key de RevenueCat (V1,
+  no V2 — ver la corrección más arriba) y `firebase functions:secrets:set`/
+  `firebase deploy` en producción son pasos manuales de Eze en las consolas
+  de Firebase/RevenueCat/terminal — no hay nada de eso que Claude Code pueda
+  automatizar (bloqueado a propósito por el modo automático: escrituras a
+  secret store y deploys de producción quedan siempre para que los corra una
+  persona).

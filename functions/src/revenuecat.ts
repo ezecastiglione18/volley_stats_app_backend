@@ -4,30 +4,32 @@ const REVENUECAT_API_BASE = 'https://api.revenuecat.com/v1';
 export const PREMIUM_ENTITLEMENT_ID = 'rallystats_pro';
 
 /**
- * Un mes calendario a propósito: hoy sólo hace falta otorgar eso por canje.
- * Si más adelante hacen falta códigos de otra duración, este es el único
- * lugar que hay que ampliar (y sumar el dato al doc de promo_codes en vez
- * de asumirlo).
+ * La duración la decide cada código (campo `durationDays` en
+ * promo_codes/{code} — ver createPromoCode.ts), no está fija en el código:
+ * un código de prueba puede otorgar 1 día, uno real para una federación
+ * puede otorgar 30.
  *
  * Se manda como `end_time_ms` en vez del campo `duration` del endpoint: la
  * API de RevenueCat lo marca como deprecado a favor de `end_time_ms`
  * (timestamp explícito de vencimiento) — https://www.revenuecat.com/docs/api-v1/entitlements
  */
-function oneMonthFromNowMs(): number {
-  const end = new Date();
-  end.setUTCMonth(end.getUTCMonth() + 1);
-  return end.getTime();
+function daysFromNowMs(days: number): number {
+  return Date.now() + days * 24 * 60 * 60 * 1000;
 }
 
 /**
  * Otorga el entitlement premium de forma promocional (gratis) vía la API de
- * RevenueCat. IMPORTANTE: los otorgamientos promocionales no tienen modo
- * sandbox — esto siempre es un otorgamiento real, sin importar qué uid se
- * use ni con qué secret key (hay una sola, no existe una "de prueba"). Para
- * probar sin afectar a un usuario real hay que usar un uid descartable, no
- * una key distinta (ver README, sub-fase 1.4).
+ * RevenueCat, por `durationDays` días. IMPORTANTE: los otorgamientos
+ * promocionales no tienen modo sandbox — esto siempre es un otorgamiento
+ * real, sin importar qué uid se use ni con qué secret key (hay una sola, no
+ * existe una "de prueba"). Para probar sin afectar a un usuario real hay que
+ * usar un uid descartable, no una key distinta (ver README, sub-fase 1.4).
  */
-export async function grantPromotionalEntitlement(uid: string, secretKey: string): Promise<void> {
+export async function grantPromotionalEntitlement(
+  uid: string,
+  secretKey: string,
+  durationDays: number,
+): Promise<void> {
   const res = await fetch(
     `${REVENUECAT_API_BASE}/subscribers/${encodeURIComponent(uid)}/entitlements/${PREMIUM_ENTITLEMENT_ID}/promotional`,
     {
@@ -36,7 +38,7 @@ export async function grantPromotionalEntitlement(uid: string, secretKey: string
         Authorization: `Bearer ${secretKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ end_time_ms: oneMonthFromNowMs() }),
+      body: JSON.stringify({ end_time_ms: daysFromNowMs(durationDays) }),
     },
   );
   if (!res.ok) {
