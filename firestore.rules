@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Reglas de la app RallyStats (login + control de dispositivo único).
+    // Viven en otro repo (volley_stats_app), pero las reglas de Firestore
+    // son por PROYECTO DE FIREBASE, no por repo/carpeta: si este archivo se
+    // despliega sin incluirlas, se pisan las que hoy están pegadas a mano en
+    // la consola (ver volley_stats_app/SETUP_FIREBASE.md) y se rompe el
+    // login/control de dispositivo de la app. Si en algún momento cambian
+    // del lado de la app, hay que traer el cambio también acá antes de
+    // volver a desplegar `firestore:rules` desde este repo.
+    match /account_devices/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Códigos promocionales de premium (ver README/CLAUDE.md). Cerrados por
+    // completo a los clientes: sólo la Cloud Function redeemPromoCode
+    // (corre con el Admin SDK, que ignora estas reglas) los lee y escribe.
+    // Así un usuario no puede leer códigos ajenos, inflar redeemedCount, ni
+    // escribirse a sí mismo un documento de redemptions falso.
+    match /promo_codes/{code} {
+      allow read, write: if false;
+
+      match /redemptions/{uid} {
+        allow read, write: if false;
+      }
+    }
+  }
+}
