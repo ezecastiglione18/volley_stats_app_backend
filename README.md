@@ -18,36 +18,108 @@ del repo.
 
 ## Qué hay que tener instalado/configurado
 
+Este repo lo tocan dos personas — Eze (dueño de las cuentas) y Fede (ayudando
+con el código) — y no las dos necesitan lo mismo. Lo de abajo separa qué hace
+falta para simplemente **compilar y probar en local** (cualquiera de los
+dos, en su propia máquina) de lo que sólo puede hacer **quien tiene acceso a
+las cuentas reales** (Firebase, RevenueCat, Google Cloud Billing — hoy, Eze).
+
+### Para compilar y probar en local (Eze o Fede, cada uno en su máquina)
+
 1. **Node.js 22** (la runtime de la Cloud Function está fijada a esa versión
-   en `functions/package.json` → `engines.node`; en esta máquina ya está
-   instalado).
-2. **Firebase CLI**: `npm install -g firebase-tools` (ya instalada en esta
-   máquina, v15.28.1). Logueada con la cuenta de Google dueña del proyecto:
-   `firebase login`.
-3. **Plan Blaze activado** en el proyecto `volleystatsapp-be835` (Firebase
+   en `functions/package.json` → `engines.node`).
+2. **Firebase CLI**: `npm install -g firebase-tools`, logueada con **la
+   cuenta de Google que cada uno use habitualmente** —
+   `firebase login`. No hace falta que sea la cuenta dueña del proyecto para
+   esto: loguearse y correr el emulador no requiere ningún permiso especial
+   sobre `volleystatsapp-be835`.
+3. Clonar el repo y `cd functions && npm install`.
+4. Con eso ya alcanza para compilar (`npm run build`), levantar el emulador
+   completo (`npm run serve`) y probar toda la lógica de rechazo del canje
+   (sub-fase 1.3 más abajo) — nada de eso toca el proyecto real de Firebase
+   ni RevenueCat.
+
+### Sólo con las cuentas reales (hoy: Eze)
+
+1. **Plan Blaze activado** en el proyecto `volleystatsapp-be835` (Firebase
    Console → ⚙️ Configuración del proyecto → Uso y facturación → Modificar
    plan). Requiere tarjeta cargada, pero no cobra nada mientras el uso quede
    dentro de la franja gratis (2M invocaciones/mes) — igual conviene
    configurar una alerta de presupuesto en Google Cloud Billing (ej. avisar
-   pasado 1 USD/mes) apenas se activa el plan.
-4. **Dependencias del código**: `cd functions && npm install`.
-5. **Secret de RevenueCat** (la *Secret API Key*, no la *Public API Key* que
-   ya usa la app — se genera en RevenueCat → Project settings → API keys →
-   "+ New secret API key"; asignarle sólo el permiso que necesita, otorgar/
-   revocar entitlements promocionales de subscribers). Hay **una sola** key
+   pasado 1 USD/mes) apenas se activa el plan. Sólo lo puede hacer quien es
+   Owner/Editor del proyecto.
+2. **Acceso al dashboard de RevenueCat** para generar/rotar la *Secret API
+   Key* (la que pega en Project settings → API keys → "+ New secret API
+   key" — no la *Public API Key* que ya usa la app). Hay **una sola** key
    por proyecto, la misma para todo — RevenueCat no tiene una key separada
-   de "sandbox" para esto (ver advertencia en la sub-fase 1.4 más abajo):
-   - Para el emulador: archivo `functions/.secret.local` (gitignored, no se
-     sube) con una línea `REVENUECAT_SECRET_KEY=<la secret key>`.
-   - Para producción: `firebase functions:secrets:set REVENUECAT_SECRET_KEY`
-     (pide pegar el mismo valor; queda en Google Secret Manager, nunca en el
-     repo).
-6. La cuenta con la que se corre `firebase deploy` necesita permisos de
-   Editor/Owner (o los roles específicos de Cloud Functions Admin + Firebase
-   Admin) sobre el proyecto de Google Cloud.
+   de "sandbox" para esto (ver advertencia en la sub-fase 1.4 más abajo).
+3. **La secret key en sí**, cargada en `functions/.secret.local` (para el
+   emulador, gitignored) o vía `firebase functions:secrets:set
+   REVENUECAT_SECRET_KEY` (para producción, queda en Google Secret Manager).
+4. **Deploy real** (`firebase deploy`) y `firebase functions:secrets:set`
+   contra producción requieren permisos de Editor/Owner (o los roles
+   puntuales Cloud Functions Admin + Firebase Admin) sobre el proyecto de
+   Google Cloud.
+
+### Si Fede necesita ir más allá del emulador
+
+No hace falta para nada de las sub-fases 1.1 a 1.3 (100% local). Si en algún
+momento hace falta que también corra las sub-fases 1.4/1.5 (que sí pegan
+contra RevenueCat/Firestore reales) o deploye él mismo, son dos decisiones
+que le corresponden a Eze, no algo que se resuelva solo:
+
+- **Sumarlo como miembro del proyecto de Firebase**: Firebase Console → ⚙️
+  Configuración del proyecto → Usuarios y permisos → Agregar miembro (su
+  email de Google), rol Editor (o los roles puntuales de arriba). Así puede
+  hacer `firebase login` con su propia cuenta y ya tiene permiso para
+  `deploy`/`secrets:set`, sin compartir la cuenta de Eze.
+- **Compartirle la secret key de RevenueCat** (para que la pegue en su
+  propio `.secret.local`, nunca por chat/mensajería sin cifrar) — es una key
+  sensible, puede otorgar o revocar premium en cualquier cuenta, así que
+  conviene pensarlo antes de repartirla.
 
 Nada de esto toca la app ni requiere una versión nueva de RallyStats — es
 100% independiente del envío que está esperando revisión en Play Store.
+
+## Comandos importantes
+
+Todos corren desde `functions/` salvo que se indique lo contrario.
+
+```bash
+# --- Setup / compilación ---
+npm install                    # instalar dependencias (primera vez, o si cambió package.json)
+npm run build                   # compilar TypeScript -> lib/ (hace falta antes de correr scripts o el emulador a mano)
+npm run build:watch              # compilar en watch mode mientras se edita
+
+# --- Desarrollo local (emulador) ---
+npm run serve                      # build + levanta Auth/Firestore/Functions emulados
+# Emulator UI (con el emulador arriba levantado): http://localhost:4000
+npm run shell                        # build + consola interactiva para invocar functions a mano
+
+# --- Generar un código promocional ---
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> [etiqueta]
+# contra el emulador: anteponer FIRESTORE_EMULATOR_HOST=localhost:8080
+# sin esa variable, y con credenciales reales: va contra producción
+
+# --- Cuenta / proyecto ---
+firebase login                         # loguear la CLI con una cuenta de Google
+firebase projects:list                   # confirmar que se ve volleystatsapp-be835
+firebase use                               # ver/confirmar a qué proyecto apunta esta carpeta
+
+# --- Secret de RevenueCat (sólo quien tenga la key real) ---
+firebase functions:secrets:set REVENUECAT_SECRET_KEY   # cargarla en producción (Secret Manager)
+
+# --- Deploy a producción ---
+npm run deploy                                   # equivale a: firebase deploy --only functions:redeemPromoCode
+firebase deploy --only functions:redeemPromoCode,firestore:rules   # ídem + reglas de Firestore (usar este si tocaste firestore.rules)
+
+# --- Logs ---
+npm run logs                                       # equivale a: firebase functions:log
+```
+
+⚠️ `npm run deploy` **no** incluye `firestore:rules` — si el cambio tocó
+`firestore.rules`, usar el comando completo con la coma, si no las reglas
+nuevas quedan sin desplegar aunque la function sí se actualice.
 
 ## Estructura
 
@@ -105,28 +177,19 @@ códigos de otra duración, hay que sumar un campo al documento (ej.
 
 ## Generar un código
 
-```bash
-cd functions
-npm run build
-node lib/scripts/createPromoCode.js UNILIVO2026 50 2026-12-31 "Unilivo"
-# Uso: createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> [etiqueta]
-```
-
-Contra qué Firestore pega depende de las credenciales activas en la terminal:
-con `FIRESTORE_EMULATOR_HOST=localhost:8080` seteada apunta al emulador (ver
+Comando y ejemplo en "Comandos importantes" arriba. Contra qué Firestore
+pega depende de las credenciales activas en la terminal: con
+`FIRESTORE_EMULATOR_HOST=localhost:8080` seteada apunta al emulador (ver
 sub-fase 1.3 más abajo); sin esa variable, y con credenciales reales
 (`GOOGLE_APPLICATION_CREDENTIALS` apuntando a una service account key, o
 `gcloud auth application-default login` ya corrido), apunta a producción.
 
 ## Deploy a producción
 
-```bash
-firebase deploy --only functions:redeemPromoCode,firestore:rules
-```
-
-Cada deploy de una function 2nd gen crea una revisión nueva de Cloud Run por
-debajo — si algo sale mal, se puede volver a la revisión anterior desde la
-consola de Cloud Run sin reescribir código.
+Comando en "Comandos importantes" arriba. Cada deploy de una function 2nd
+gen crea una revisión nueva de Cloud Run por debajo — si algo sale mal, se
+puede volver a la revisión anterior desde la consola de Cloud Run sin
+reescribir código.
 
 ## Plan de implementación en sub-fases (Fase 1 del PDF)
 
