@@ -45,6 +45,15 @@ de días que indique ese código**. Este repo generalizó esa idea:
   (`'monthly' | 'weekly' | ...`, pensado en los buckets fijos de RevenueCat).
   Se manda a RevenueCat como `end_time_ms` (timestamp explícito), no como el
   campo `duration` del PDF — ver la corrección de abajo sobre por qué.
+  Excepción: `durationDays: 'lifetime'` se manda como `duration: 'lifetime'`
+  (`end_time_ms` no puede expresar "sin vencimiento"; ese valor del campo
+  deprecado sigue documentado).
+- Qué otorga, también por código: campo `entitlementId` (`rallystats_pro`
+  si falta — así se crearon los primeros códigos — o `device_addon_1/2/3`,
+  un dispositivo adicional cada uno; lista válida en `PROMO_ENTITLEMENT_IDS`
+  de `revenuecat.ts`, que debe coincidir con `kDeviceAddOnEntitlementIds`
+  de la app). La respuesta exitosa devuelve `{ ok: true, entitlementId }`
+  para que la app muestre el mensaje que corresponde.
 
 ## Corrección respecto al PDF: RevenueCat no tiene modo sandbox para esto
 
@@ -110,7 +119,7 @@ npm run serve                # build + levantar emuladores (auth, firestore, fun
 npm run shell                  # build + firebase functions:shell (invocar a mano)
 npm run deploy                   # firebase deploy --only functions:redeemPromoCode
 npm run logs                       # firebase functions:log
-node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias> [etiqueta]
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime> [etiqueta] [--entitlement=<id>]
 ```
 
 No hay `flutter analyze`/tests automatizados en este repo — es sólo backend

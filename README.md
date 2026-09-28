@@ -103,7 +103,8 @@ npm run serve                      # build + levanta Auth/Firestore/Functions em
 npm run shell                        # build + consola interactiva para invocar functions a mano
 
 # --- Generar un código promocional ---
-node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias> [etiqueta]
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime> [etiqueta] [--entitlement=<id>]
+# sin --entitlement otorga premium (rallystats_pro); para un dispositivo adicional: --entitlement=device_addon_1 (o _2, _3)
 # contra el emulador: anteponer FIRESTORE_EMULATOR_HOST=localhost:8080
 # sin esa variable, y con credenciales reales: va contra producción
 
@@ -164,7 +165,8 @@ promo_codes/{code}                  // ej: "UNILIVO2026"
   label: string | null              // referencia para el admin (opcional)
   maxRedemptions: number            // cupo total del código
   redeemedCount: number             // contador, se incrementa en la transacción
-  durationDays: number              // cuántos días de premium otorga ESTE código (ej. 1, 30)
+  entitlementId: string             // qué otorga: rallystats_pro (default si falta) o device_addon_1/2/3
+  durationDays: number | 'lifetime' // cuántos días otorga ESTE código (ej. 1, 30), o sin vencimiento
   expiresAt: timestamp              // el código deja de servir después de esta fecha
   createdAt: timestamp
   createdBy: string                 // usuario del SO que corrió el script
@@ -188,7 +190,15 @@ bloqueada sin haber recibido nada.
 La duración la decide **cada código** (`durationDays`), no es fija: un
 código de prueba puede otorgar 1 día, uno real para una federación puede
 otorgar 30. `revenuecat.ts` calcula la fecha de vencimiento a partir de ese
-número y la manda a RevenueCat como `end_time_ms`.
+número y la manda a RevenueCat como `end_time_ms`; con `'lifetime'` manda
+`duration: 'lifetime'` (lo mismo que la opción "Lifetime" del dashboard).
+
+Lo que otorga también lo decide cada código (`entitlementId`): premium, o
+uno de los tres complementos de "dispositivo adicional" (`device_addon_1`,
+`_2`, `_3`), que la app suma al límite de dispositivos igual que si se
+hubieran comprado (ver `deviceLimitFrom` en `subscription_tiers.dart` de
+la app). Esos entitlements tienen que existir creados en el dashboard de
+RevenueCat con esos identificadores exactos.
 
 ## Generar un código
 

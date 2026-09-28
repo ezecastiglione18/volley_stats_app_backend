@@ -4,7 +4,11 @@ import { defineSecret } from 'firebase-functions/params';
 import * as logger from 'firebase-functions/logger';
 
 import { db } from './firestore';
-import { grantPromotionalEntitlement } from './revenuecat';
+import {
+  grantPromotionalEntitlement,
+  PREMIUM_ENTITLEMENT_ID,
+  PromoDuration,
+} from './revenuecat';
 
 /** Secret API Key de RevenueCat (no la Public Key que usa la app). Se carga
  * con `firebase functions:secrets:set REVENUECAT_SECRET_KEY` en producción,
@@ -18,7 +22,7 @@ type RedeemError =
   | 'already_used_by_account';
 
 type ReservationResult =
-  | { ok: true; durationDays: number }
+  | { ok: true; entitlementId: string; duration: PromoDuration }
   | { ok: false; error: RedeemError };
 
 function normalizeCode(raw: unknown): string {
@@ -27,12 +31,15 @@ function normalizeCode(raw: unknown): string {
 }
 
 /**
- * Canjea un código promocional y, si es válido, otorga el entitlement
- * rallystats_pro a la cuenta que llama por la cantidad de días que indique
- * el código (`durationDays`). Un mismo código no se puede canjear dos veces
- * desde la misma cuenta (subdocumento promo_codes/{code}/redemptions/{uid}).
+ * Canjea un código promocional y, si es válido, otorga a la cuenta que
+ * llama el entitlement que indique el código (`entitlementId`: rallystats_pro
+ * si el código no lo trae, o uno de "dispositivo adicional") por la duración
+ * del código (`durationDays`: días, o 'lifetime'). Un mismo código no se
+ * puede canjear dos veces desde la misma cuenta (subdocumento
+ * promo_codes/{code}/redemptions/{uid}).
  *
- * Devuelve { ok: true } o { ok: false, error } para los rechazos esperados
+ * Devuelve { ok: true, entitlementId } (para que la app sepa qué mensaje
+ * mostrar) o { ok: false, error } para los rechazos esperados
  * (código inválido/vencido/agotado/ya usado); sólo lanza HttpsError ante
  * fallas de sesión, argumentos, o si RevenueCat no responde.
  */
@@ -81,10 +88,13 @@ export const redeemPromoCode = onCall(
         return { ok: false, error: 'already_used_by_account' };
       }
 
-      const durationDays = data.durationDays as number;
+      // Los códigos creados antes de existir `entitlementId` otorgaban
+      // siempre premium: se mantiene ese default.
+      const entitlementId = (data.entitlementId as string | undefined) ?? PREMIUM_ENTITLEMENT_ID;
+      const duration = data.durationDays as PromoDuration;
       tx.update(codeRef, { redeemedCount: FieldValue.increment(1) });
       tx.set(redemptionRef, { redeemedAt: null, reservedAt: FieldValue.serverTimestamp() });
-      return { ok: true, durationDays };
+      return { ok: true, entitlementId, duration };
     });
 
     if (!reservation.ok) {
@@ -94,7 +104,12 @@ export const redeemPromoCode = onCall(
 
     // 2) Recién ahora, fuera de la transacción, pegarle a RevenueCat.
     try {
-      await grantPromotionalEntitlement(uid, revenueCatSecretKey.value(), reservation.durationDays);
+      await grantPromotionalEntitlement(
+        uid,
+        revenueCatSecretKey.value(),
+        reservation.entitlementId,
+        reservation.duration,
+      );
     } catch (err) {
       // Si RevenueCat falla, liberar el cupo reservado para no "quemar" el
       // código en vano ni dejar a la cuenta bloqueada para reintentar. Esto
@@ -128,7 +143,11 @@ export const redeemPromoCode = onCall(
     // podía volver a pasar por acá (ver el chequeo de `redeemedAt` arriba).
     await redemptionRef.update({ redeemedAt: FieldValue.serverTimestamp() });
 
-    logger.info('redeemPromoCode: canje exitoso', { uid, code });
-    return { ok: true };
+    logger.info('redeemPromoCode: canje exitoso', {
+      uid,
+      code,
+      entitlementId: reservation.entitlementId,
+    });
+    return { ok: true, entitlementId: reservation.entitlementId };
   },
 );
