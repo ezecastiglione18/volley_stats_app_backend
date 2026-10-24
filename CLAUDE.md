@@ -185,7 +185,11 @@ puntual — incluye tanto las reglas de `account_devices` (que en realidad le
 pertenecen conceptualmente a `volley_stats_app`, pero hoy sólo existen
 pegadas a mano en la consola, ver su `SETUP_FIREBASE.md`) como las de
 `promo_codes` (cerradas del todo: `allow read, write: if false` — sólo el
-Admin SDK, que ignora las reglas de seguridad, puede tocarlas). **Si algún
+Admin SDK, que ignora las reglas de seguridad, puede tocarlas), y desde el
+23/10/2026 las del sync de partidos y equipos de la app
+(`matches/{uid}/user_matches/{matchId}` y `teams/{uid}/user_teams/{teamId}`,
+solo el dueño del uid; escritas pero **sin desplegar** — el deploy lo hace
+Eze con `firebase deploy --only firestore:rules`). **Si algún
 día cambian las reglas del lado de la app, hay que traer el cambio también
 acá antes de volver a desplegar `firestore:rules` desde este repo, o se
 pisan.**

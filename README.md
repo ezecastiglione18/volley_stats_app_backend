@@ -232,7 +232,9 @@ en la siguiente** — no conviene probar todo junto la primera vez.
 
 ### 1.2 — Reglas de Firestore
 
-- Ya escritas en `firestore.rules` (unión de `account_devices` + `promo_codes`).
+- Ya escritas en `firestore.rules` (unión de `account_devices` + `promo_codes`, más
+  `matches/{uid}/user_matches` y `teams/{uid}/user_teams` del sync de la app, agregadas
+  el 23/10/2026, todavía sin desplegar).
 
 **Prueba:** `firebase emulators:start --only firestore` y, desde la pestaña
 **Firestore** de la Emulator UI (`http://localhost:4000`), usar **Rules
