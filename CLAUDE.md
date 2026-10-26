@@ -188,8 +188,11 @@ pegadas a mano en la consola, ver su `SETUP_FIREBASE.md`) como las de
 Admin SDK, que ignora las reglas de seguridad, puede tocarlas), y desde el
 23/10/2026 las del sync de partidos y equipos de la app
 (`matches/{uid}/user_matches/{matchId}` y `teams/{uid}/user_teams/{teamId}`,
-solo el dueño del uid; escritas pero **sin desplegar** — el deploy lo hace
-Eze con `firebase deploy --only firestore:rules`). **Si algún
+solo el dueño del uid; ya desplegadas), y desde el 26/10/2026 las de las
+jugadas de la pizarra y el fixture (`plays/{uid}/user_plays/{playId}` y
+`fixture/{uid}/user_fixture/{entryId}`, mismo criterio; escritas pero **sin
+desplegar** — el deploy lo hace Eze con `firebase deploy --only
+firestore:rules`). **Si algún
 día cambian las reglas del lado de la app, hay que traer el cambio también
 acá antes de volver a desplegar `firestore:rules` desde este repo, o se
 pisan.**
