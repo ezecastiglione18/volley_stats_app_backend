@@ -7,12 +7,18 @@
  * sub-fase 1.3), o a producción si hay credenciales reales
  * (GOOGLE_APPLICATION_CREDENTIALS) — Admin SDK decide solo según el entorno.
  *
- * Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime> [etiqueta] [--entitlement=<id>]
+ * Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
  * Ejemplos:
  *   node lib/scripts/createPromoCode.js UNILIVO2026 50 2026-12-31 30 "Unilivo"
  *   node lib/scripts/createPromoCode.js DISPO1 1 2026-12-31 lifetime "Dispositivo extra" --entitlement=device_addon_1
+ *   node lib/scripts/createPromoCode.js FINDEANIO 50 2026-10-31 fecha "Premium hasta fin de 2026" --until=2026-12-31
  *
  * Sin --entitlement, el código otorga premium (rallystats_pro).
+ *
+ * La fecha de la 3ª posición es hasta cuándo se puede CANJEAR el código. Con
+ * --until, el otorgamiento termina en esa fecha fija (inclusive, 23:59 hora
+ * Argentina) para todos, sin importar cuándo canjeen; en ese caso la duración
+ * va como la palabra `fecha` (no se usan días).
  */
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
@@ -24,11 +30,12 @@ if (getApps().length === 0) {
 }
 
 const USAGE =
-  'Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime> [etiqueta] [--entitlement=<id>]';
+  'Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const entitlementFlag = args.find((a) => a.startsWith('--entitlement='));
+  const untilFlag = args.find((a) => a.startsWith('--until='));
   const [rawCode, maxRedemptionsRaw, expiresAtRaw, durationDaysRaw, label] = args.filter(
     (a) => !a.startsWith('--'),
   );
@@ -53,8 +60,27 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  let durationDays: PromoDuration;
-  if (durationDaysRaw.toLowerCase() === 'lifetime') {
+  // Fecha fija de fin del otorgamiento (inclusive, 23:59 hora Argentina).
+  let premiumUntil: Date | undefined;
+  if (untilFlag) {
+    premiumUntil = new Date(`${untilFlag.slice('--until='.length)}T23:59:59-03:00`);
+    if (Number.isNaN(premiumUntil.getTime())) {
+      console.error('Fecha de --until invalida, usar YYYY-MM-DD');
+      process.exit(1);
+    }
+    if (durationDaysRaw.toLowerCase() !== 'fecha') {
+      console.error('Con --until, la duracion tiene que ser la palabra "fecha" (no se usan dias)');
+      process.exit(1);
+    }
+  } else if (durationDaysRaw.toLowerCase() === 'fecha') {
+    console.error('"fecha" solo se usa junto con --until=<YYYY-MM-DD>');
+    process.exit(1);
+  }
+
+  let durationDays: PromoDuration | null;
+  if (premiumUntil) {
+    durationDays = null;
+  } else if (durationDaysRaw.toLowerCase() === 'lifetime') {
     durationDays = 'lifetime';
   } else {
     durationDays = Number(durationDaysRaw);
@@ -86,12 +112,17 @@ async function main(): Promise<void> {
     maxRedemptions,
     redeemedCount: 0,
     durationDays,
+    ...(premiumUntil ? { premiumUntil: Timestamp.fromDate(premiumUntil) } : {}),
     expiresAt: Timestamp.fromDate(expiresAt),
     createdAt: Timestamp.now(),
     createdBy: process.env.USERNAME || process.env.USER || 'desconocido',
   });
 
-  const durationText = durationDays === 'lifetime' ? 'lifetime' : `${durationDays} dia(s)`;
+  const durationText = premiumUntil
+    ? `hasta ${premiumUntil.toISOString()}`
+    : durationDays === 'lifetime'
+      ? 'lifetime'
+      : `${durationDays} dia(s)`;
   console.log(
     `Codigo ${code} creado: entitlement=${entitlementId}, cupo=${maxRedemptions}, duracion=${durationText}, vence=${expiresAt.toISOString()}${
       label ? `, etiqueta="${label}"` : ''

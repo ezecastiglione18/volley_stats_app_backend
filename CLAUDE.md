@@ -48,6 +48,10 @@ de días que indique ese código**. Este repo generalizó esa idea:
   Excepción: `durationDays: 'lifetime'` se manda como `duration: 'lifetime'`
   (`end_time_ms` no puede expresar "sin vencimiento"; ese valor del campo
   deprecado sigue documentado).
+  Alternativa: campo opcional `premiumUntil` (timestamp) — fecha fija de fin
+  que manda sobre `durationDays` (que queda `null`), para que todos terminen
+  el mismo día sin importar cuándo canjeen. Se crea con `--until=` en el
+  script (la duración posicional va como `fecha`).
 - Qué otorga, también por código: campo `entitlementId` (`rallystats_pro`
   si falta — así se crearon los primeros códigos — o `device_addon_1/2/3`,
   un dispositivo adicional cada uno; lista válida en `PROMO_ENTITLEMENT_IDS`
@@ -119,7 +123,7 @@ npm run serve                # build + levantar emuladores (auth, firestore, fun
 npm run shell                  # build + firebase functions:shell (invocar a mano)
 npm run deploy                   # firebase deploy --only functions:redeemPromoCode
 npm run logs                       # firebase functions:log
-node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime> [etiqueta] [--entitlement=<id>]
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
 ```
 
 No hay `flutter analyze`/tests automatizados en este repo — es sólo backend

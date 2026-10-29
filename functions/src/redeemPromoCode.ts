@@ -22,7 +22,7 @@ type RedeemError =
   | 'already_used_by_account';
 
 type ReservationResult =
-  | { ok: true; entitlementId: string; duration: PromoDuration }
+  | { ok: true; entitlementId: string; duration: PromoDuration; endsAtMs?: number }
   | { ok: false; error: RedeemError };
 
 function normalizeCode(raw: unknown): string {
@@ -34,7 +34,9 @@ function normalizeCode(raw: unknown): string {
  * Canjea un código promocional y, si es válido, otorga a la cuenta que
  * llama el entitlement que indique el código (`entitlementId`: rallystats_pro
  * si el código no lo trae, o uno de "dispositivo adicional") por la duración
- * del código (`durationDays`: días, o 'lifetime'). Un mismo código no se
+ * del código (`durationDays`: días, o 'lifetime'; o, si el código trae
+ * `premiumUntil`, hasta esa fecha fija sin importar cuándo se canjee). Un
+ * mismo código no se
  * puede canjear dos veces desde la misma cuenta (subdocumento
  * promo_codes/{code}/redemptions/{uid}).
  *
@@ -92,9 +94,16 @@ export const redeemPromoCode = onCall(
       // siempre premium: se mantiene ese default.
       const entitlementId = (data.entitlementId as string | undefined) ?? PREMIUM_ENTITLEMENT_ID;
       const duration = data.durationDays as PromoDuration;
+      // Fecha fija de fin (opcional): si ya pasó no hay nada que otorgar, y
+      // RevenueCat rechazaría un `end_time_ms` en el pasado.
+      const premiumUntil = data.premiumUntil as Timestamp | undefined;
+      const endsAtMs = premiumUntil?.toMillis();
+      if (endsAtMs !== undefined && endsAtMs <= Date.now()) {
+        return { ok: false, error: 'expired' };
+      }
       tx.update(codeRef, { redeemedCount: FieldValue.increment(1) });
       tx.set(redemptionRef, { redeemedAt: null, reservedAt: FieldValue.serverTimestamp() });
-      return { ok: true, entitlementId, duration };
+      return { ok: true, entitlementId, duration, endsAtMs };
     });
 
     if (!reservation.ok) {
@@ -109,6 +118,7 @@ export const redeemPromoCode = onCall(
         revenueCatSecretKey.value(),
         reservation.entitlementId,
         reservation.duration,
+        reservation.endsAtMs,
       );
     } catch (err) {
       // Si RevenueCat falla, liberar el cupo reservado para no "quemar" el

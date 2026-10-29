@@ -103,8 +103,10 @@ npm run serve                      # build + levanta Auth/Firestore/Functions em
 npm run shell                        # build + consola interactiva para invocar functions a mano
 
 # --- Generar un código promocional ---
-node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime> [etiqueta] [--entitlement=<id>]
+node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
 # sin --entitlement otorga premium (rallystats_pro); para un dispositivo adicional: --entitlement=device_addon_1 (o _2, _3)
+# la <YYYY-MM-DD> de la 3ª posición es hasta cuándo se puede CANJEAR; con --until=<YYYY-MM-DD> el otorgamiento
+# termina en esa fecha fija (inclusive) para todos, y la duración va como la palabra "fecha"
 # contra el emulador: anteponer FIRESTORE_EMULATOR_HOST=localhost:8080
 # sin esa variable, y con credenciales reales: va contra producción
 
@@ -166,8 +168,9 @@ promo_codes/{code}                  // ej: "UNILIVO2026"
   maxRedemptions: number            // cupo total del código
   redeemedCount: number             // contador, se incrementa en la transacción
   entitlementId: string             // qué otorga: rallystats_pro (default si falta) o device_addon_1/2/3
-  durationDays: number | 'lifetime' // cuántos días otorga ESTE código (ej. 1, 30), o sin vencimiento
-  expiresAt: timestamp              // el código deja de servir después de esta fecha
+  durationDays: number | 'lifetime' | null // cuántos días otorga ESTE código (ej. 1, 30), o sin vencimiento; null si usa premiumUntil
+  premiumUntil: timestamp           // (opcional) fecha fija de fin del otorgamiento; si está, manda sobre durationDays
+  expiresAt: timestamp              // el código deja de servir (de CANJEAR) después de esta fecha
   createdAt: timestamp
   createdBy: string                 // usuario del SO que corrió el script
 
@@ -192,6 +195,12 @@ código de prueba puede otorgar 1 día, uno real para una federación puede
 otorgar 30. `revenuecat.ts` calcula la fecha de vencimiento a partir de ese
 número y la manda a RevenueCat como `end_time_ms`; con `'lifetime'` manda
 `duration: 'lifetime'` (lo mismo que la opción "Lifetime" del dashboard).
+
+Si el código trae `premiumUntil`, se manda ese timestamp fijo como
+`end_time_ms` en vez de `ahora + durationDays`: todos terminan el mismo día
+sin importar cuándo canjeen. Si esa fecha ya pasó al momento de canjear, se
+rechaza como `expired`. Es opcional — los códigos anteriores no lo tienen y
+siguen funcionando igual.
 
 Lo que otorga también lo decide cada código (`entitlementId`): premium, o
 uno de los tres complementos de "dispositivo adicional" (`device_addon_1`,

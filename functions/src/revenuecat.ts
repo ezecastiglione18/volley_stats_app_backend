@@ -37,14 +37,18 @@ export type PromoDuration = number | 'lifetime';
  * y `duration: 'lifetime'` sigue siendo un valor documentado (verificado en
  * septiembre 2026).
  */
-function grantBody(duration: PromoDuration): Record<string, unknown> {
+function grantBody(duration: PromoDuration, endsAtMs?: number): Record<string, unknown> {
+  // Fecha fija de fin (campo `premiumUntil` del código): manda sobre la
+  // duración, para que todos terminen el mismo día sin importar cuándo canjeen.
+  if (endsAtMs !== undefined) return { end_time_ms: endsAtMs };
   if (duration === 'lifetime') return { duration: 'lifetime' };
   return { end_time_ms: Date.now() + duration * 24 * 60 * 60 * 1000 };
 }
 
 /**
  * Otorga `entitlementId` de forma promocional (gratis) vía la API de
- * RevenueCat, por `duration`. IMPORTANTE: los otorgamientos
+ * RevenueCat, por `duration` — o hasta `endsAtMs` (timestamp en ms) si se
+ * pasa, en cuyo caso `duration` se ignora. IMPORTANTE: los otorgamientos
  * promocionales no tienen modo sandbox — esto siempre es un otorgamiento
  * real, sin importar qué uid se use ni con qué secret key (hay una sola, no
  * existe una "de prueba"). Para probar sin afectar a un usuario real hay que
@@ -55,6 +59,7 @@ export async function grantPromotionalEntitlement(
   secretKey: string,
   entitlementId: string,
   duration: PromoDuration,
+  endsAtMs?: number,
 ): Promise<void> {
   const res = await fetch(
     `${REVENUECAT_API_BASE}/subscribers/${encodeURIComponent(uid)}/entitlements/${encodeURIComponent(entitlementId)}/promotional`,
@@ -64,7 +69,7 @@ export async function grantPromotionalEntitlement(
         Authorization: `Bearer ${secretKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(grantBody(duration)),
+      body: JSON.stringify(grantBody(duration, endsAtMs)),
     },
   );
   if (!res.ok) {
