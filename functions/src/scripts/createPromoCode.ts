@@ -8,7 +8,14 @@
  * (GOOGLE_APPLICATION_CREDENTIALS) — Admin SDK decide solo según el entorno.
  *
  * Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
+ *      node lib/scripts/createPromoCode.js --random <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
+ *
+ * Con --random no se pasa <CODIGO>: se genera uno aleatorio de 12 caracteres
+ * (imposible de adivinar, a diferencia de uno tipo PALABRA2026) y se imprime
+ * al final. Preferir siempre --random para códigos nuevos.
+ *
  * Ejemplos:
+ *   node lib/scripts/createPromoCode.js --random 1 2026-12-31 30 "Prueba Juan"
  *   node lib/scripts/createPromoCode.js UNILIVO2026 50 2026-12-31 30 "Unilivo"
  *   node lib/scripts/createPromoCode.js DISPO1 1 2026-12-31 lifetime "Dispositivo extra" --entitlement=device_addon_1
  *   node lib/scripts/createPromoCode.js FINDEANIO 50 2026-10-31 fecha "Premium hasta fin de 2026" --until=2026-12-31
@@ -20,6 +27,8 @@
  * Argentina) para todos, sin importar cuándo canjeen; en ese caso la duración
  * va como la palabra `fecha` (no se usan días).
  */
+import { randomInt } from 'node:crypto';
+
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 
@@ -30,15 +39,31 @@ if (getApps().length === 0) {
 }
 
 const USAGE =
-  'Uso: node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]';
+  'Uso: node lib/scripts/createPromoCode.js <CODIGO|--random> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]';
+
+// 32 símbolos (sin I/O/0/1, que se confunden al dictarlos o copiarlos) x 12
+// posiciones = 2^60 combinaciones. Sin guiones ni espacios: el campo de la app
+// solo rechaza espacios, y el código tiene que viajar tal cual por WhatsApp.
+const RANDOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const RANDOM_CODE_LENGTH = 12;
+
+function generateRandomCode(): string {
+  let out = '';
+  for (let i = 0; i < RANDOM_CODE_LENGTH; i++) {
+    out += RANDOM_CODE_ALPHABET[randomInt(RANDOM_CODE_ALPHABET.length)];
+  }
+  return out;
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const entitlementFlag = args.find((a) => a.startsWith('--entitlement='));
   const untilFlag = args.find((a) => a.startsWith('--until='));
-  const [rawCode, maxRedemptionsRaw, expiresAtRaw, durationDaysRaw, label] = args.filter(
-    (a) => !a.startsWith('--'),
-  );
+  const useRandom = args.includes('--random');
+  const positional = args.filter((a) => !a.startsWith('--'));
+  const [rawCode, maxRedemptionsRaw, expiresAtRaw, durationDaysRaw, label] = useRandom
+    ? [generateRandomCode(), ...positional]
+    : positional;
 
   if (!rawCode || !maxRedemptionsRaw || !expiresAtRaw || !durationDaysRaw) {
     console.error(USAGE);

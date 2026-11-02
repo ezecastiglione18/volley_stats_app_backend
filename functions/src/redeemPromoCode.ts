@@ -30,6 +30,63 @@ function normalizeCode(raw: unknown): string {
   return raw.trim().toUpperCase();
 }
 
+/** Intentos de canje permitidos por cuenta dentro de la ventana, antes de
+ * rechazar sin siquiera mirar el código (freno a quien prueba códigos al
+ * azar). Un canje exitoso reinicia el contador. */
+const MAX_ATTEMPTS_PER_WINDOW = 10;
+const ATTEMPTS_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Consume un intento de la cuenta en promo_attempts/{uid} (colección que sólo
+ * toca el Admin SDK: las reglas de Firestore la dejan cerrada a los clientes
+ * porque no tiene ningún `match`). Se consume ANTES de validar el código, en
+ * una transacción, para que pedidos simultáneos no se cuelen por encima del
+ * límite. Devuelve false si la cuenta ya agotó los intentos de la ventana.
+ *
+ * Si Firestore falla acá, se deja pasar (fail-open): un error de este contador
+ * no debe impedirle el canje a un usuario legítimo.
+ */
+async function takeAttempt(uid: string): Promise<boolean> {
+  const ref = db.collection('promo_attempts').doc(uid);
+  try {
+    return await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const now = Date.now();
+      const windowStart = snap.data()?.windowStart as number | undefined;
+      if (windowStart === undefined || now - windowStart >= ATTEMPTS_WINDOW_MS) {
+        tx.set(ref, { count: 1, windowStart: now });
+        return true;
+      }
+      const count = (snap.data()?.count as number | undefined) ?? 0;
+      if (count >= MAX_ATTEMPTS_PER_WINDOW) return false;
+      tx.update(ref, { count: FieldValue.increment(1) });
+      return true;
+    });
+  } catch (err) {
+    logger.error('redeemPromoCode: no se pudo registrar el intento, se deja pasar', {
+      uid,
+      error: String(err),
+    });
+    return true;
+  }
+}
+
+/** Devuelve el intento consumido (canje exitoso: reinicia todo; fallo de
+ * RevenueCat: no es culpa del usuario, no cuenta). "Best effort": si falla,
+ * sólo queda un intento de más gastado en la ventana. */
+async function releaseAttempt(uid: string, reset: boolean): Promise<void> {
+  const ref = db.collection('promo_attempts').doc(uid);
+  try {
+    if (reset) {
+      await ref.delete();
+    } else {
+      await ref.update({ count: FieldValue.increment(-1) });
+    }
+  } catch (err) {
+    logger.error('redeemPromoCode: no se pudo devolver el intento', { uid, error: String(err) });
+  }
+}
+
 /**
  * Canjea un código promocional y, si es válido, otorga a la cuenta que
  * llama el entitlement que indique el código (`entitlementId`: rallystats_pro
@@ -40,13 +97,17 @@ function normalizeCode(raw: unknown): string {
  * puede canjear dos veces desde la misma cuenta (subdocumento
  * promo_codes/{code}/redemptions/{uid}).
  *
+ * Cada cuenta tiene un máximo de intentos por hora (ver takeAttempt): pasado
+ * el máximo lanza HttpsError 'resource-exhausted' sin mirar el código.
+ *
  * Devuelve { ok: true, entitlementId } (para que la app sepa qué mensaje
  * mostrar) o { ok: false, error } para los rechazos esperados
  * (código inválido/vencido/agotado/ya usado); sólo lanza HttpsError ante
  * fallas de sesión, argumentos, o si RevenueCat no responde.
  */
 export const redeemPromoCode = onCall(
-  { region: 'southamerica-east1', secrets: [revenueCatSecretKey] },
+  // maxInstances: tope de gasto si alguien le pega en masa a la función.
+  { region: 'southamerica-east1', secrets: [revenueCatSecretKey], maxInstances: 10 },
   async (request) => {
     if (!request.auth) {
       throw new HttpsError('unauthenticated', 'Hay que iniciar sesion');
@@ -55,6 +116,11 @@ export const redeemPromoCode = onCall(
     const code = normalizeCode(request.data?.code);
     if (!code) {
       throw new HttpsError('invalid-argument', 'Falta el codigo');
+    }
+
+    if (!(await takeAttempt(uid))) {
+      logger.warn('redeemPromoCode: cuenta sin intentos disponibles', { uid });
+      throw new HttpsError('resource-exhausted', 'Demasiados intentos, proba mas tarde');
     }
 
     const codeRef = db.collection('promo_codes').doc(code);
@@ -145,6 +211,7 @@ export const redeemPromoCode = onCall(
           error: String(rollbackErr),
         });
       }
+      await releaseAttempt(uid, false);
       throw new HttpsError('unavailable', 'No se pudo activar el premium, proba de nuevo');
     }
 
@@ -152,6 +219,7 @@ export const redeemPromoCode = onCall(
     // entitlement — antes de esto, un reintento de la misma cuenta todavía
     // podía volver a pasar por acá (ver el chequeo de `redeemedAt` arriba).
     await redemptionRef.update({ redeemedAt: FieldValue.serverTimestamp() });
+    await releaseAttempt(uid, true);
 
     logger.info('redeemPromoCode: canje exitoso', {
       uid,
