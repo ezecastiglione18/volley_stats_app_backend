@@ -16,6 +16,18 @@ alternativa, modelo de datos, seguridad) ver el documento
 `CLAUDE.md` tiene el resumen de las decisiones ya tomadas y las convenciones
 del repo.
 
+## Estado actual (al 2 de noviembre de 2026)
+
+| Punto | Estado |
+|---|---|
+| 1.1 Cuenta y plan | ✅ Hecho. Blaze activo; presupuesto mensual de USD 1 con alertas al 50, 90 y 100 %. |
+| 1.2 Reglas de Firestore | ✅ Desplegadas el 26/10/2026 (incluyen `matches`, `teams`, `plays` y `fixture` del sync de la app); coinciden con `firestore.rules`. |
+| 1.3 Lógica de rechazo en emulador | ✅ Hecho. Además hay pruebas del límite de intentos (ver 1.6). |
+| 1.4 Integración real con RevenueCat | ✅ Hecho. |
+| 1.5 Deploy a producción | ✅ Hecho. Última versión desplegada el 2/11/2026 (con `maxInstances: 10` y límite de intentos). Canje real de prueba con un código `--random`: funcionó. |
+| 1.6 Logs, monitoreo y hardening | 🟡 Parcial. Hecho: `maxInstances`, límite de intentos, backups, protección contra borrado, alerta de errores 5xx. Pendiente: App Check, alerta por picos de `invalid_code`, probar una restauración de backup, runbook. |
+| Fase 2 (lado app) | ✅ Implementada y probada contra este backend. La publicación en Play se sigue en el repo de la app. |
+
 ## Qué hay que tener instalado/configurado
 
 Este repo lo tocan dos personas — Eze (dueño de las cuentas) y Fede (ayudando
@@ -110,6 +122,12 @@ node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|l
 # contra el emulador: anteponer FIRESTORE_EMULATOR_HOST=localhost:8080
 # sin esa variable, y con credenciales reales: va contra producción
 
+# --- Generar un código aleatorio (recomendado para códigos reales) ---
+node lib/scripts/createPromoCode.js --random <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
+# ídem npm run create-code -- --random ...
+# con --random NO se pasa el código: lo genera el script (12 caracteres de ABCDEFGHJKLMNPQRSTUVWXYZ23456789,
+# sin I/O/0/1, con crypto.randomInt) y lo imprime al terminar. Los argumentos que siguen son los mismos de arriba, sin <CODIGO>.
+
 # --- Cuenta / proyecto ---
 firebase login                         # loguear la CLI con una cuenta de Google
 firebase projects:list                   # confirmar que se ve volleystatsapp-be835
@@ -179,8 +197,15 @@ promo_codes/{code}/redemptions/{uid}
   redeemedAt: timestamp | null      // null hasta que RevenueCat confirma; recién ahí "ya usado" de verdad
 ```
 
-Cerrado por completo a lectura/escritura de clientes (`firestore.rules`) —
-sólo la Cloud Function, que corre con el Admin SDK, accede.
+```
+promo_attempts/{uid}                // límite de intentos por cuenta (ver 1.6)
+  count: number                     // intentos consumidos en la ventana actual
+  windowStart: number               // inicio de la ventana (ms desde epoch); dura 1 hora
+```
+
+Todo lo de arriba está cerrado por completo a lectura/escritura de clientes
+(`firestore.rules`; `promo_attempts` no tiene regla, así que queda denegada)
+— sólo la Cloud Function, que corre con el Admin SDK, accede.
 
 El doc de `redemptions/{uid}` pasa por dos estados a propósito: se crea con
 `redeemedAt: null` al reservar el cupo, y recién se confirma (`redeemedAt`
@@ -211,7 +236,11 @@ RevenueCat con esos identificadores exactos.
 
 ## Generar un código
 
-Comando y ejemplo en "Comandos importantes" arriba. Contra qué Firestore
+Comando y ejemplo en "Comandos importantes" arriba. Para códigos reales
+conviene `--random`: un código con palabra + año (tipo `UNILIVO2026`) se
+puede adivinar, uno de 12 caracteres aleatorios (32^12 ≈ 2^60 combinaciones)
+no. Los códigos ya emitidos con el formato viejo siguen funcionando igual.
+Contra qué Firestore
 pega depende de las credenciales activas en la terminal: con
 `FIRESTORE_EMULATOR_HOST=localhost:8080` seteada apunta al emulador (ver
 sub-fase 1.3 más abajo); sin esa variable, y con credenciales reales
@@ -233,6 +262,9 @@ en la siguiente** — no conviene probar todo junto la primera vez.
 
 ### 1.1 — Cuenta y plan
 
+**Estado: ✅ hecho.** Blaze activo; presupuesto de USD 1/mes con alertas al
+50, 90 y 100 %.
+
 - Activar plan Blaze + alerta de presupuesto (ver checklist arriba).
 - `firebase login`, confirmar que ve el proyecto: `firebase projects:list`.
 
@@ -241,9 +273,12 @@ en la siguiente** — no conviene probar todo junto la primera vez.
 
 ### 1.2 — Reglas de Firestore
 
+**Estado: ✅ desplegadas el 26/10/2026**, con `plays` y `fixture` incluidos;
+las publicadas en la consola coinciden con `firestore.rules`.
+
 - Ya escritas en `firestore.rules` (unión de `account_devices` + `promo_codes`, más
-  `matches/{uid}/user_matches` y `teams/{uid}/user_teams` del sync de la app, agregadas
-  el 23/10/2026, todavía sin desplegar).
+  los datos de sync de la app: `matches`, `teams`, `plays` y `fixture`, todos
+  accesibles sólo por su dueño).
 
 **Prueba:** `firebase emulators:start --only firestore` y, desde la pestaña
 **Firestore** de la Emulator UI (`http://localhost:4000`), usar **Rules
@@ -253,6 +288,8 @@ usuario autenticado con su propio uid sobre `account_devices/{ese uid}` →
 tiene que dar **Allowed** (para no haber roto el login sin querer).
 
 ### 1.3 — Lógica de canje contra el emulador (casos de rechazo)
+
+**Estado: ✅ hecho.**
 
 Estos cuatro casos (`invalid_code`, `expired`, `quota_exceeded`,
 `already_used_by_account`) se resuelven **antes** de llamar a RevenueCat, así
@@ -279,6 +316,8 @@ firebase emulators:start --only auth,firestore,functions
    `already_used_by_account`.
 
 ### 1.4 — Integración real con RevenueCat (uid descartable, no sandbox)
+
+**Estado: ✅ hecho.**
 
 > ⚠️ **Corrección respecto al PDF original**: RevenueCat **no tiene un modo
 > sandbox para otorgamientos promocionales** — "los otorgamientos
@@ -316,8 +355,10 @@ firebase emulators:start --only auth,firestore,functions
 
 ### 1.5 — Deploy a producción
 
-**Ya se hizo** (función activa en `southamerica-east1`, secret V1 cargado,
-probado de punta a punta con un código real desde la app). Para repetirlo
+**Estado: ✅ hecho.** Función activa en `southamerica-east1`, secret V1
+cargado, probado de punta a punta con un código real desde la app. Última
+versión desplegada el 2/11/2026 (`maxInstances: 10` + límite de intentos); ese
+día se confirmó un canje real con un código generado con `--random`. Para repetirlo
 después de un cambio de código, o si hay que rotar el secret:
 
 1. `firebase functions:secrets:set REVENUECAT_SECRET_KEY` — sólo hace falta
@@ -349,25 +390,57 @@ código real por error.
 - Cada invocación ya queda en Cloud Logging (los `logger.info`/`logger.error`
   de `redeemPromoCode.ts` incluyen uid/código/resultado, para poder
   responder si alguien reclama que un código "no le funcionó").
-- Sugerido, no implementado todavía: una alerta de tasa de error en Cloud
-  Monitoring, y sumar Firebase App Check para que la function sólo acepte
-  llamadas que vengan de la app real (ver PDF, sección 7).
+**Estado: 🟡 parcial (al 2/11/2026).**
 
-## Fase 2 (lado app — implementada, todavía no publicada)
+Hecho:
+
+- **Tope de instancias:** `maxInstances: 10` en `redeemPromoCode`, para acotar
+  el gasto si alguien le pega en masa.
+- **Límite de intentos:** 10 por hora y por cuenta, contados en
+  `promo_attempts/{uid}` con una transacción. Se consume un intento **antes**
+  de validar el código (aunque el código sea válido, el intento número 11 de
+  la hora se rechaza con `resource-exhausted`, sin gastar cupo). Un canje
+  exitoso reinicia el contador, y si falla RevenueCat (`unavailable`) el
+  intento se devuelve. Si el propio contador falla (error de Firestore), la
+  función sigue sin límite en vez de bloquear canjes legítimos, y lo deja en
+  el log. La app ya trata cualquier error desconocido como error genérico, así
+  que no hizo falta tocarla. Límite conocido: es por cuenta, y registrarse es
+  libre; no frena a quien use muchas cuentas.
+- **Backups de Firestore:** diarios, con retención de 7 días; protección
+  contra borrado de la base activada. PITR desactivada a propósito. La base
+  `(default)` está en `nam5` (Estados Unidos) y esa ubicación no se puede
+  cambiar.
+- **Alerta de errores:** política de Cloud Monitoring «RallyStats - errores en
+  canje de códigos» sobre errores 5xx de `redeempromocode` (ventana de 5
+  minutos). Los rechazos normales (`invalid_code`, 429) no la disparan.
+- Cada invocación queda en Cloud Logging (los `logger.info`/`logger.error` de
+  `redeemPromoCode.ts` incluyen uid/código/resultado, para poder responder si
+  alguien reclama que un código "no le funcionó").
+
+Pendiente:
+
+- **Firebase App Check** para que la function sólo acepte llamadas de la app
+  real (requiere cambio en la app y una versión nueva; ver PDF, sección 7).
+- Alerta por picos de `invalid_code` / `resource-exhausted`.
+- Probar una restauración de backup al menos una vez y escribir un runbook de
+  incidentes.
+
+## Fase 2 (lado app — implementada)
+
+**Estado: ✅ implementada y probada contra este backend real.** En qué versión
+publicada de Play sale se sigue en el repo de la app.
 
 No es parte de este repo, vive en `volley_stats_app`: `cloud_functions` en
 el `pubspec.yaml`, `lib/services/redeem_code_service.dart` y la pantalla
 `lib/screens/subscription/redeem_code_screen.dart` (accesible desde
 Configuración de la cuenta → "Tengo un código"). Ya está escrita y probada
-de punta a punta contra este backend real (build instalado por fuera de
-Play Store) — lo único que falta es que salga en una versión publicada:
-seguir el proceso de release ya documentado en el `CLAUDE.md` de ese repo
-(regenerar el manual si corresponde, `flutter analyze`, APK, AAB) y subirla
-como versión nueva (ej. 1.0.3), pasando de nuevo por revisión de Google
-Play. Ver el `CLAUDE.md` de `volley_stats_app` para los dos detalles no
-obvios del lado cliente (región de la function, invalidar el caché de
-RevenueCat después del canje).
+de punta a punta contra este backend real. Para publicarla, seguir el
+proceso de release ya documentado en el `CLAUDE.md` de ese repo (regenerar
+el manual si corresponde, `flutter analyze`, APK, AAB) y subirla como versión
+nueva, pasando por revisión de Google Play. Ver el `CLAUDE.md` de
+`volley_stats_app` para los dos detalles no obvios del lado cliente (región
+de la function, invalidar el caché de RevenueCat después del canje).
 
-Mientras tanto, para cualquiera que necesite el premium antes de que esa
-versión nueva esté publicada, el otorgamiento manual por dashboard de
-RevenueCat sigue funcionando igual, sin depender de esto.
+Para cualquiera que no tenga todavía una versión con "Tengo un código", el
+otorgamiento manual por dashboard de RevenueCat sigue funcionando igual, sin
+depender de esto.
