@@ -20,6 +20,16 @@ Firebase Auth (mismo uid que loguea `AuthService` en la app) y su Firestore
 (mismo proyecto que aloja `account_devices`). No hay build step de la app acá
 ni viceversa — son dos repos, un solo proyecto de Firebase.
 
+## Segunda función: `submitFeedback` (13/11/2026)
+
+El repo ya no tiene una sola función. `functions/src/submitFeedback.ts` recibe los reportes del formulario de la app
+(sección 26): valida, aplica 5 envíos por hora y cuenta (`feedback_attempts/{uid}`), guarda en `feedback/{id}`
+**antes** de mandar el mail (nodemailer + Gmail), y marca `sent`/`failed`; devuelve `{ ok: true }` aunque el mail
+falle. Destino = `FEEDBACK_TO` (`functions/.env`); credenciales = secretos `GMAIL_USER` y `GMAIL_APP_PASSWORD`.
+Detalle, modelo de datos, retención (TTL de 12 meses sobre `expireAt`) y tests en el README. Tiene tests
+(`npm test`, emulador de Firestore): es la excepción a "no hay tests automatizados" de más abajo, que sigue valiendo
+para `redeemPromoCode`.
+
 ## Decisión de diseño: por qué Cloud Functions
 
 Se comparó contra Cloudflare Workers y Node en Render/Fly — las tres cuestan
@@ -121,7 +131,8 @@ npm run build             # compilar TypeScript (tsc) a lib/
 npm run build:watch        # compilar en watch mode
 npm run serve                # build + levantar emuladores (auth, firestore, functions)
 npm run shell                  # build + firebase functions:shell (invocar a mano)
-npm run deploy                   # firebase deploy --only functions:redeemPromoCode
+npm run deploy                   # firebase deploy --only functions:redeemPromoCode,functions:submitFeedback
+npm test                           # submitFeedback contra el emulador de Firestore (Java 21+)
 npm run logs                       # firebase functions:log
 node lib/scripts/createPromoCode.js <CODIGO> <cupo> <YYYY-MM-DD> <duracionDias|lifetime|fecha> [etiqueta] [--entitlement=<id>] [--until=<YYYY-MM-DD>]
 ```

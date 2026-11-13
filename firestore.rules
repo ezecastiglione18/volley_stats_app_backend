@@ -46,5 +46,17 @@ service cloud.firestore {
         allow read, write: if false;
       }
     }
+
+    // Reportes de error / consultas (función submitFeedback, sección 26) y su
+    // límite de envíos por cuenta. Cerrados por completo a los clientes: solo
+    // la Cloud Function, con el Admin SDK, los lee y escribe. (Sin ningún
+    // `match` quedarían denegados igual; se escriben explícitos para que se
+    // vea la intención y no se abran por error.)
+    match /feedback/{id} {
+      allow read, write: if false;
+    }
+    match /feedback_attempts/{uid} {
+      allow read, write: if false;
+    }
   }
 }

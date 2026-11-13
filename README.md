@@ -16,6 +16,10 @@ alternativa, modelo de datos, seguridad) ver el documento
 `CLAUDE.md` tiene el resumen de las decisiones ya tomadas y las convenciones
 del repo.
 
+> **Desde el 13/11/2026 hay una segunda función, `submitFeedback`** (formulario "Reportar un error o
+> consultar" de la app, sección 26): guarda el reporte en Firestore y lo manda por mail. Ver "Reportes de
+> error" más abajo. El resto de este README sigue hablando del canje de códigos.
+
 ## Estado actual (al 2 de noviembre de 2026)
 
 | Punto | Estado |
@@ -27,6 +31,7 @@ del repo.
 | 1.5 Deploy a producción | ✅ Hecho. Última versión desplegada el 2/11/2026 (con `maxInstances: 10` y límite de intentos). Canje real de prueba con un código `--random`: funcionó. |
 | 1.6 Logs, monitoreo y hardening | 🟡 Parcial. Hecho: `maxInstances`, límite de intentos, backups, protección contra borrado, alerta de errores 5xx. Pendiente: App Check, alerta por picos de `invalid_code`, probar una restauración de backup, runbook. |
 | Fase 2 (lado app) | ✅ Implementada y probada contra este backend. La publicación en Play se sigue en el repo de la app. |
+| `submitFeedback` (13/11/2026) | 🟡 Escrita y probada con el emulador (9 tests); **sin desplegar**. Falta: cargar los dos secretos de Gmail, desplegar función y reglas, crear la política TTL y la prueba manual (ver "Reportes de error"). |
 
 ## Qué hay que tener instalado/configurado
 
@@ -136,9 +141,16 @@ firebase use                               # ver/confirmar a qué proyecto apunt
 # --- Secret de RevenueCat (sólo quien tenga la key real) ---
 firebase functions:secrets:set REVENUECAT_SECRET_KEY   # cargarla en producción (Secret Manager)
 
+# --- Tests (emulador de Firestore; ver "Reportes de error → Tests") ---
+npm test                                           # build + node:test de submitFeedback contra el emulador
+
+# --- Secretos de Gmail (submitFeedback; sólo quien tenga la cuenta real) ---
+firebase functions:secrets:set GMAIL_USER              # la cuenta de Gmail que manda los mails
+firebase functions:secrets:set GMAIL_APP_PASSWORD      # su contraseña de aplicación (16 letras, sin espacios)
+
 # --- Deploy a producción ---
-npm run deploy                                   # equivale a: firebase deploy --only functions:redeemPromoCode
-firebase deploy --only functions:redeemPromoCode,firestore:rules   # ídem + reglas de Firestore (usar este si tocaste firestore.rules)
+npm run deploy                                   # equivale a: firebase deploy --only functions:redeemPromoCode,functions:submitFeedback
+firebase deploy --only functions:redeemPromoCode,functions:submitFeedback,firestore:rules   # ídem + reglas de Firestore (usar este si tocaste firestore.rules)
 
 # --- Logs ---
 npm run logs                                       # equivale a: firebase functions:log
@@ -161,10 +173,14 @@ functions/
   src/
     index.ts              # exporta las functions desplegables
     redeemPromoCode.ts     # la Cloud Function callable
+    submitFeedback.ts      # reportes de error / consultas (sección 26)
     revenuecat.ts           # llamada HTTP a la API de RevenueCat
     firestore.ts             # instancia compartida del Admin SDK
     scripts/
       createPromoCode.ts      # script de administración (no se despliega)
+  test/
+    submitFeedback.test.js    # pruebas con el emulador de Firestore (no se despliegan)
+  .env                       # FEEDBACK_TO (parámetro no secreto de submitFeedback)
 ```
 
 ### ⚠️ `firestore.rules` es del proyecto entero, no de este repo
@@ -173,7 +189,11 @@ Las reglas de seguridad de Firestore son un recurso único por proyecto de
 Firebase, no algo que cada repo tenga "por su lado". Hoy incluyen tanto la
 regla de `account_devices` (que usa la app, hasta ahora pegada a mano en la
 consola — ver `SETUP_FIREBASE.md` en `volley_stats_app`) como la de
-`promo_codes` (nueva, de este repo). Si en algún momento cambian las reglas
+`promo_codes` (nueva, de este repo), las del sync de la app (`matches`,
+`teams`, `plays`, `fixture`) y, desde el 13/11/2026, `feedback` y
+`feedback_attempts` (cerradas a los clientes, **sin desplegar todavía**).
+Antes de desplegar, comparar este archivo con las reglas publicadas en la
+consola: el 26/10 coincidían. Si en algún momento cambian las reglas
 del lado de la app, hay que traer ese cambio también a este archivo *antes*
 de correr `firebase deploy --only firestore:rules` — si no, se pisan y se
 rompe el login.
@@ -203,8 +223,26 @@ promo_attempts/{uid}                // límite de intentos por cuenta (ver 1.6)
   windowStart: number               // inicio de la ventana (ms desde epoch); dura 1 hora
 ```
 
+```
+feedback/{autoId}                   // reportes de error / consultas (submitFeedback, sección 26)
+  uid: string                       // cuenta que lo mandó (lo toma la función de la sesión)
+  name: string | null               // opcional, hasta 80 caracteres
+  contactEmail: string | null       // opcional, formato válido; es a quien se le responde
+  comment: string                   // 10 a 2000 caracteres
+  diagnostics: map                  // appVersion, platform, osVersion, plan (free/premium/desconocido),
+                                    //   cloudEnabled (bool | null), locale. NUNCA el mail de la cuenta
+  createdAt: timestamp              // serverTimestamp
+  expireAt: timestamp               // createdAt + 12 meses: lo borra la política TTL de Firestore
+  status: 'pending' | 'sent' | 'failed'   // pending al guardar; sent/failed según el mail
+
+feedback_attempts/{uid}             // límite de envíos por cuenta: 5 por hora
+  count: number
+  windowStart: number               // ms desde epoch; la ventana dura 1 hora
+```
+
 Todo lo de arriba está cerrado por completo a lectura/escritura de clientes
-(`firestore.rules`; `promo_attempts` no tiene regla, así que queda denegada)
+(`firestore.rules`; `promo_attempts` no tiene regla, así que queda denegada; `feedback` y
+`feedback_attempts` tienen su `match` con `allow read, write: if false`)
 — sólo la Cloud Function, que corre con el Admin SDK, accede.
 
 El doc de `redemptions/{uid}` pasa por dos estados a propósito: se crea con
@@ -253,6 +291,58 @@ Comando en "Comandos importantes" arriba. Cada deploy de una function 2nd
 gen crea una revisión nueva de Cloud Run por debajo — si algo sale mal, se
 puede volver a la revisión anterior desde la consola de Cloud Run sin
 reescribir código.
+
+## Reportes de error (`submitFeedback`, sección 26)
+
+Función `onCall` de `southamerica-east1` (`maxInstances: 10`) que recibe lo que la app manda desde
+Configuración → "Reportar un error o consultar". Va en `functions/src/submitFeedback.ts`; la lógica está en
+`processFeedback` (con el envío del mail inyectable, para poder probarla sin SMTP) y el `onCall` solo la conecta
+con Gmail. Orden, pensado para que **un reporte nunca se pierda**:
+
+1. Sin sesión → `unauthenticated`. El `uid` sale de la sesión; la app no lo manda.
+2. Valida lo mismo que la app (comentario 10-2000 sin contar espacios de los bordes, nombre ≤ 80, mail opcional
+   con formato válido y ≤ 254); los campos desconocidos se ignoran y el diagnóstico se sanea (lista cerrada de
+   claves, topes de largo, sin caracteres de control: lo que va al asunto del mail no puede partir un
+   encabezado). Datos inválidos → `invalid-argument`, **sin gastar un envío**.
+3. Límite: 5 por hora y cuenta en `feedback_attempts/{uid}`, mismo patrón que `promo_attempts` (transacción,
+   fail-open si el contador falla). El sexto → `resource-exhausted`. A diferencia del canje, un envío exitoso **no**
+   reinicia el contador; solo se devuelve el intento si no se pudo guardar el reporte.
+4. Guarda `feedback/{autoId}` con `status: "pending"`. Si esto falla → `internal` (la app conserva el texto).
+5. Recién ahí intenta el mail (nodemailer, SMTP de Gmail, timeouts de 15 s). Para: `FEEDBACK_TO`; asunto
+   `[RallyStats] Reporte · v{versión} · {plataforma}`; cuerpo en texto plano con nombre, mail, comentario,
+   diagnóstico y uid; `replyTo` solo si el usuario dejó un mail.
+6. Marca `sent` o `failed` (con el error en los logs: `firebase functions:log`, buscar "fallo el envio del mail")
+   y devuelve `{ ok: true }` **aunque el mail falle**, porque el reporte quedó guardado.
+
+**Configuración.** `FEEDBACK_TO` es un parámetro no secreto (`defineString`) y vive en `functions/.env`
+(`FEEDBACK_TO=...`; se cambia con un deploy, sin publicar otra versión de la app; la dirección ya figura en la
+política de privacidad). `GMAIL_USER` y `GMAIL_APP_PASSWORD` son secretos (`defineSecret`): en producción con
+`firebase functions:secrets:set` (Secret Manager) y, para el emulador, en `functions/.secret.local`. Hace falta una
+cuenta de Gmail con **verificación en dos pasos** y una **contraseña de aplicación** (Cuenta de Google → Seguridad →
+Contraseñas de aplicaciones; se pega sin los espacios). Alternativa descartada por ahora: un servicio como Resend.
+Igual que con RevenueCat, `secrets:set` no redespliega solo: después de cambiar un secreto hay que desplegar (o
+contestar que sí cuando la CLI lo ofrece).
+
+**Retención de 12 meses.** Cada reporte lleva `expireAt`. Falta crear **una vez** la política TTL de Firestore que
+lo usa (no se despliega con `firebase deploy`):
+
+```bash
+gcloud firestore fields ttls update expireAt --collection-group=feedback --enable-ttl --project=volleystatsapp-be835
+```
+
+(o Firebase Console → Firestore → TTL → crear política, colección `feedback`, campo `expireAt`). El borrado es
+automático pero no instantáneo (suele tardar hasta un día). Los reportes **no** se borran al eliminar la cuenta
+(las reglas los cierran a la app): se piden por mail (ver el borrador de política del repo de la app).
+
+**Tests.** `npm test` compila y corre `functions/test/submitFeedback.test.js` (`node:test`) contra el emulador de
+Firestore (`firebase emulators:exec`), con el envío del mail simulado: sin sesión se rechaza; los datos inválidos se
+rechazan y no gastan envíos; límites exactos (10/2000, 80); el sexto envío de la hora se rechaza y la ventana se
+reinicia pasada la hora; con el mail simulado el documento pasa a `sent` (y lleva `replyTo` solo si hay mail); si el
+mail tira error queda `failed` y la función devuelve ok; sin `FEEDBACK_TO` también queda `failed`. El emulador
+necesita **Java 21 o más**: el del sistema es 17, pero el JBR de Android Studio (`D:\Android\jbr`) sirve:
+`JAVA_HOME=D:\Android\jbr PATH=$JAVA_HOME/bin:$PATH npm test`.
+
+**Prueba manual** (después de desplegar): ver la lista al final de la sesión del 13/11/2026 en `PROXIMOS_PASOS.md`.
 
 ## Plan de implementación en sub-fases (Fase 1 del PDF)
 
